@@ -59,6 +59,7 @@ typedef int                BOOL;
 #define SYS_SVC_REGISTER 41     // 注册服务：把当前线程登记为某个名字
 #define SYS_SVC_LOOKUP   42     // 查找服务：按名字取 tid
 #define SYS_SVC_LIST     43     // 列出所有服务（结果写入共享页）
+#define SYS_KILL         47     // 终止进程（P2 崩溃自愈验收用）
 
 // ---------------------------------------------------------------------------
 //  IPC 消息结构

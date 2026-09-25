@@ -25,6 +25,7 @@
 #include <kernel/pic.hpp>
 #include <kernel/log.hpp>
 #include <kernel/svcdir.hpp>
+#include <kernel/supervisor.hpp>
 #include <kernel/usermode.hpp>
 #include <kernel/vmm.hpp>
 #include <kernel/pmm.hpp>
@@ -512,6 +513,37 @@ extern "C" u64 syscall_handler(Registers* regs)
                     break;
                 }
                 thread::yield();
+            }
+        }
+        break;
+    case Sys::KILL:
+        // -----------------------------------------------------------------
+        //  【P2】终止一个进程
+        //  ---------------------------------------------------------------
+        //  存在的意义是**验证崩溃自愈**：用户可以 kill 掉键盘服务，
+        //  观察"系统没挂 + 键盘几秒内恢复"。
+        //
+        //  微内核下这是安全的：被杀的只是用户态进程，
+        //  内核和其他服务不受影响。
+        //
+        //  权限：只允许杀别的用户态进程，内核线程（idle/main）不允许。
+        //  （真正的用户权限体系在 P5，这里只做最基本的保护）
+        // -----------------------------------------------------------------
+        {
+            int target = static_cast<int>(a1);
+            int caller = thread::current_tid();
+
+            // 自杀：把状态改掉即可，返回后调度器自然带走
+            if (target == caller) {
+                thread::Thread* self = thread::current();
+                if (self != nullptr) {
+                    self->state = thread::State::DEAD;
+                }
+                thread::wake_waiters_of(caller);
+                supervisor::notify_dead(caller);
+                ret = 0;
+            } else {
+                ret = static_cast<u64>(supervisor::kill(target));
             }
         }
         break;

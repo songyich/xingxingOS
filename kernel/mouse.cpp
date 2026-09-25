@@ -206,6 +206,12 @@ void invalidate()
     g_has_old = false;
 }
 
+
+bool visible()
+{
+    return g_visible;
+}
+
 void show()
 {
     if (!available()) return;

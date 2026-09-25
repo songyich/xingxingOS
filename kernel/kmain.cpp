@@ -30,6 +30,7 @@
 #include <kernel/pit.hpp>
 #include <kernel/keyboard.hpp>
 #include <kernel/shell.hpp>
+#include <kernel/supervisor.hpp>
 #include <kernel/thread.hpp>
 #include <kernel/gdt.hpp>
 #include <kernel/ipc.hpp>
@@ -295,6 +296,29 @@ extern "C" void kmain(u32 multiboot_magic, u64 multiboot_info_phys)
     if (tid_mouse <= 0) {
         kprintf_serial("[warn] 鼠标服务未创建（无 PS/2 鼠标设备？）\n");
     }
+
+    // --- 12.5 【P2 崩溃自愈】把服务交给监管者看护 ---
+    //
+    //   登记之后，任何一个服务崩溃都只会被这一个进程"带走"，
+    //   内核继续跑，监管者会在 200ms 后把它重新拉起来（复用同一个 tid）。
+    //
+    //   这就是微内核隔离收益真正兑现的地方：
+    //   kill 掉键盘服务 → 系统不挂 → 键盘几秒内恢复可用。
+    supervisor::init();
+    if (tid_term  > 0) supervisor::watch(tid_term,  "terminal",
+            reinterpret_cast<u64>(&terminal_service_entry),  thread::PRIO_HIGH);
+    if (tid_kbd   > 0) supervisor::watch(tid_kbd,   "keyboard",
+            reinterpret_cast<u64>(&keyboard_service_entry),  thread::PRIO_HIGH);
+    if (tid_timer > 0) supervisor::watch(tid_timer, "timer",
+            reinterpret_cast<u64>(&timer_service_entry),     thread::PRIO_NORMAL);
+    if (tid_shell > 0) supervisor::watch(tid_shell, "shell",
+            reinterpret_cast<u64>(&shell_service_entry),     thread::PRIO_NORMAL);
+    if (tid_power > 0) supervisor::watch(tid_power, "power",
+            reinterpret_cast<u64>(&power_service_entry),     thread::PRIO_NORMAL);
+    if (tid_proc  > 0) supervisor::watch(tid_proc,  "proc",
+            reinterpret_cast<u64>(&proc_service_entry),      thread::PRIO_NORMAL);
+    if (tid_mouse > 0) supervisor::watch(tid_mouse, "mouse",
+            reinterpret_cast<u64>(&mouse_service_entry),     thread::PRIO_NORMAL);
     // --- 服务注册：把各服务登记到 /system/services/<name> ---
     //
     //   这样别的程序可以按**名字**找服务，不用记 TID。

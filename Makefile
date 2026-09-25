@@ -162,6 +162,13 @@ $(INITRD_BIN): $(USER_XZS)
 	@mkdir -p $(dir $@)
 	python3 tools/mkinitrd.py $@ $(USER_XZS)
 
+# ⚠️ 关键依赖：initrd_embed.asm 用 incbin 把 initrd.bin 嵌进内核，
+#    但汇编源文件本身**看不出**它依赖 initrd.bin ——
+#    不加这条，make 就不知道"initrd 变了要重新汇编"，
+#    于是新增命令程序后 make iso 仍用旧包，表现为"找不到程序"。
+#    （历史上"make 用了旧 .o 根本没重编译"就是这个坑）
+$(BUILD_DIR)/arch/x86_64/initrd_embed.o: $(INITRD_BIN)
+
 .PHONY: user-programs
 user-programs: $(USER_XZS)
 

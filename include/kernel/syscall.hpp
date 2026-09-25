@@ -51,6 +51,7 @@ enum class Sys : u64 {
     SVC_REGISTER = 41,  // 注册服务：a1=名字指针 a2=名字长度（把当前线程登记为该服务）
     SVC_LOOKUP   = 42,  // 查找服务：a1=名字指针 a2=名字长度，返回 tid
     WAIT         = 44,  // 等某个线程结束：a1=tid
+    KILL         = 47,  // 【P2】终止进程：a1=tid（用于验证崩溃自愈）
     MOUSE_DRAW   = 45,  // 画鼠标指针：a1=模式(0绝对 1相对) a2=x/dx a3=y/dy
     MOUSE_CENTER = 46,  // 指针移到屏幕正中，返回 (y<<32)|x（给服务同步初始坐标）
 };

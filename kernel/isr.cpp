@@ -11,6 +11,8 @@
 #include <kernel/pic.hpp>
 #include <kernel/printf.hpp>
 #include <kernel/thread.hpp>
+#include <kernel/supervisor.hpp>
+#include <kernel/serial.hpp>
 
 // 定义在 kernel/syscall.cpp。
 // ⚠️ 必须声明在**全局**作用域：写在匿名 namespace 里会变成
@@ -206,6 +208,57 @@ void dump_registers(const Registers* regs)
     }
 }
 
+// ---------------------------------------------------------------------------
+//  用户态服务崩溃：只杀这一个进程，系统继续跑
+//  -------------------------------------------------------------------------
+//  返回值是"接下来要用哪个栈" —— 直接交给调度器挑下一个线程，
+//  于是一次普通的线程切换就把崩溃的进程带走了，内核毫发无伤。
+//
+//  ⚠️ 绝对不能在这里做复杂的内存操作（建页表、分配栈等）。
+//    我们还在中断栈上，任何可能再次触发异常的动作都很危险。
+//    真正的"重新拉起"延后到 supervisor::tick() 里做（普通上下文）。
+//
+//  为什么诊断只走串口不上屏？
+//    崩溃是异常事件，不该污染正常显示；
+//    而且服务崩了之后屏幕要留给系统继续使用。
+// ---------------------------------------------------------------------------
+u64 handle_user_fault(const Registers* regs)
+{
+    int tid = thread::current_tid();
+    const thread::Thread* t = thread::by_tid(tid);
+
+    const char* name = (t != nullptr) ? t->name : "?";
+
+    kprintf_serial("\n[崩溃] 用户态进程 %s (tid=%d) 触发异常 %llu (%s)\n",
+                   name, tid, regs->int_no,
+                   exception_name(static_cast<u8>(regs->int_no)));
+    kprintf_serial("       RIP=0x%llx  错误码=0x%llx\n", regs->rip, regs->err_code);
+    if (regs->int_no == 14) {
+        kprintf_serial("       CR2=0x%llx（访问了不该访问的地址）\n", read_cr2());
+    }
+    kprintf_serial("       → 只终止该进程，系统继续运行\n");
+
+    // --- 1. 标记死亡 ---
+    //  注意：不能在中断上下文里"回收"它（释放栈/页表），
+    //  只改状态就够了，剩下的交给调度器自然跳过。
+    if (t != nullptr) {
+        thread::Thread* cur = thread::current();
+        cur->state = thread::State::DEAD;
+        cur->ipc_state = thread::IpcState::NONE;
+    }
+
+    // --- 2. 唤醒所有等它回复的线程 ---
+    //  不做这一步，所有正在等这个服务的客户端会**永久卡死** ——
+    //  表面看是"服务崩了"，实际是"半个系统跟着陪葬"。
+    thread::wake_waiters_of(tid);
+
+    // --- 3. 通知监管者：这个服务待重启 ---
+    supervisor::notify_dead(tid);
+
+    // --- 4. 交给调度器，切到下一个该跑的线程 ---
+    return sched::on_interrupt(reinterpret_cast<u64>(regs));
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -257,8 +310,28 @@ void register_handler(u8 int_no, void (*handler)(const Registers*))
 // ---------------------------------------------------------------------------
 extern "C" u64 isr_handler(const Registers* regs)
 {
-    // 0~31 是 CPU 异常，内核自己处理
+    // 0~31 是 CPU 异常
     if (regs->int_no < 32) {
+        // -------------------------------------------------------------------
+        //  【P2 崩溃自愈】先看这个异常发生在哪个特权级
+        // -------------------------------------------------------------------
+        //  cs 的最低 2 位是 CPL（Current Privilege Level）：
+        //    CPL=0 → 内核态崩了，那是真的事故，只能停机
+        //    CPL=3 → 某个用户态服务崩了，**只杀它一个，系统继续跑**
+        //
+        //  这正是微内核的意义所在：
+        //    驱动放在用户态，崩了也就是一个进程没了，
+        //    内核和其他服务都好好的，还能把它重新拉起来。
+        //
+        //  改造前这里是不分青红皂白一律 handle_exception → hlt，
+        //  于是"服务崩 = 整机死"，微内核只付出了 IPC 开销却拿不到隔离收益。
+        // -------------------------------------------------------------------
+        const bool from_user = (regs->cs & 0x3) == 0x3;
+
+        if (from_user && thread::enabled()) {
+            return handle_user_fault(regs);
+        }
+
         handle_exception(regs);
         // handle_exception 是 [[noreturn]]，不会走到这里
     }

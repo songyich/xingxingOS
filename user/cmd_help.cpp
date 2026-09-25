@@ -17,5 +17,6 @@ int main(int argc, char** argv)
     XingPrintLn("    reboot    重启");
     XingPrintLn("    shutdown  关机（ACPI 真断电）");
     XingPrintLn("    log       on/off/flush 日志落盘");
+    XingPrintLn("    kill      终止进程（验证崩溃自愈：kill keyboard）");
     return 0;
 }

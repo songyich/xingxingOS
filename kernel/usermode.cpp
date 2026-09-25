@@ -145,6 +145,9 @@ bool map_user_pages(u64 virt, u64 phys, u64 count, bool executable)
 // 于是它们看到的是同一块物理内存 —— 消息天然跨进程可见。
 static u64 g_ipc_page_phys = 0;
 
+// 前向声明：create_user_process 会用到（完整定义在它后面）
+void setup_user_frame(thread::Thread* t, u64 entry_virt);
+
 int create_user_process(const char* name, u64 entry_virt, int priority)
 {
     // --- 1. 独立页表 ---
@@ -290,20 +293,30 @@ int create_user_process(const char* name, u64 entry_virt, int priority)
     t->kernel_stack_top = t->stack_top;
 
     // --- 5. 伪造"从 Ring 3 陷入内核"的现场 ---
-    //
-    // 新进程从未运行过，栈上没有现场。我们要手工摆一个 Registers，
-    // 让调度器切过去、中断出口弹完寄存器后，iret/sysret 直接进用户态。
-    //
-    // 关键字段：
-    //   cs     = 用户代码段 | RPL3（0x2b）—— iret 靠它决定返回哪个特权级
-    //   ss     = 用户数据段 | RPL3（0x23）
-    //   rip    = 用户代码入口
-    //   rsp    = 用户栈顶
-    //   rflags = 0x202（IF=1，让用户进程一上来就开着中断）
-    //
-    // 为什么 cs/ss 的最低 2 位必须是 3？
-    //   RPL=3 表示"以用户态身份访问"。iret 会根据它把 CPL 设成 3，
-    //   进程这才真正跑在 Ring 3。
+    setup_user_frame(t, entry_virt);
+    return tid;
+}
+
+// ---------------------------------------------------------------------------
+//  构造用户态现场（create 与 respawn 共用）
+//  -------------------------------------------------------------------------
+//  新进程（或刚被重启的进程）从未运行过，栈上没有现场。
+//  手工摆一个 Registers，让调度器切过去、中断出口弹完寄存器后，
+//  iret/sysret 直接进用户态。
+//
+//  关键字段：
+//    cs     = 用户代码段 | RPL3（0x2b）—— iret 靠它决定返回哪个特权级
+//    ss     = 用户数据段 | RPL3（0x23）
+//    rip    = 用户代码入口
+//    rsp    = 用户栈顶
+//    rflags = 0x202（IF=1，让用户进程一上来就开着中断）
+//
+//  为什么 cs/ss 的最低 2 位必须是 3？
+//    RPL=3 表示"以用户态身份访问"。iret 会根据它把 CPL 设成 3，
+//    进程这才真正跑在 Ring 3。
+// ---------------------------------------------------------------------------
+void setup_user_frame(thread::Thread* t, u64 entry_virt)
+{
     constexpr u64 FRAME = sizeof(Registers);
 
     Registers* r = reinterpret_cast<Registers*>(t->stack_top - FRAME);
@@ -317,9 +330,6 @@ int create_user_process(const char* name, u64 entry_virt, int priority)
 
     // 入口地址：服务代码现在就链接在用户地址空间，
     // 所以 entry_virt 本身就是用户态可直接执行的地址，无需换算。
-    //
-    // （之前需要 "USER_CODE_BASE + 段内偏移"，是因为服务代码
-    //   被链接在内核高半区。现在 VMA 改到 0x400000 后这一步省掉了。）
     r->rip = entry_virt;
 
     r->int_no   = 0;
@@ -332,8 +342,49 @@ int create_user_process(const char* name, u64 entry_virt, int priority)
     //   用户看到的是满屏 [usermode] rip=... cs=0x2b，非常干扰。
     //   纯开发期残留，已删除。需要时走 kprintf_serial。
     t->state = thread::State::READY;
+}
 
-    return tid;
+// ---------------------------------------------------------------------------
+//  重启一个已死亡的用户态服务（复用同一个 tid 槽位）
+//  -------------------------------------------------------------------------
+//  【为什么复用 tid，而不是新建进程？】
+//    服务目录（svcdir）登记的正是 tid，各服务之间也直接持有 tid 常量
+//    （TID_KEYBOARD=3 之类）。若重建时分配新 tid，
+//    所有持有旧 tid 的引用立刻失效 —— 服务"复活了却没人找得到它"。
+//    复用槽位则 tid 不变，其他服务完全无感。
+//
+//  【为什么不用重新建页表？】
+//    页表还在（线程死了只是 state=DEAD，页表没释放），
+//    代码段/数据段/IPC 共享页/用户栈的映射全都完好。
+//    只要把栈指针重置回栈顶、现场重摆一遍即可 —— 零分配、无泄漏。
+// ---------------------------------------------------------------------------
+int respawn_user_process(int tid, u64 entry_virt)
+{
+    thread::Thread* t = thread::by_tid(tid);
+    if (t == nullptr) return -1;
+    if (!t->is_user)  return -1;
+
+    // --- 清掉所有"上辈子"残留的等待状态 ---
+    // 不清的话，重启后的服务一上来就以为自己在等消息/等中断，
+    // 直接阻塞 —— 表现是"服务重启了但依旧没反应"。
+    t->ipc_state       = thread::IpcState::NONE;
+    t->ipc_recv_buf    = nullptr;
+    t->ipc_wait_target = -1;
+    t->ipc_from        = -1;
+    t->irq_waiting     = -1;
+    t->irq_received    = false;
+    t->wait_tid        = -1;
+    t->wake_time_ms    = 0;
+
+    setup_user_frame(t, entry_virt);
+    return 0;
+}
+
+// IPC 共享页的内核虚拟地址（supervisor 清残留状态时用）
+u64 ipc_page_virt()
+{
+    if (g_ipc_page_phys == 0) return 0;
+    return g_ipc_page_phys + 0xFFFFFFFF80000000ull;
 }
 
 // ---------------------------------------------------------------------------

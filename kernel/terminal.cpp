@@ -378,6 +378,34 @@ static void scroll_grid_one_line()
 
 void scroll_one_line()
 {
+    // ===================================================================
+    //  【滚屏前必须做的准备】擦掉光标 + 鼠标指针
+    // -------------------------------------------------------------------
+    //  滚屏是**整体搬像素**。如果这时光标（反色块）或鼠标指针正画在
+    //  屏幕上，它们的像素会被一起搬到上一行 ——
+    //  而字符网格/指针状态并不知道这件事，于是：
+    //
+    //    · 上一行末尾永久留下一个反色块（光标残影）
+    //    · 上一行留下一个箭头（鼠标残影，看起来像"多了一个鼠标"）
+    //
+    //  用户实测的两个现象正对应这两条：
+    //    ① "过的那几行光标会遗留在末尾"   ← 光标残影
+    //    ② "输入错误命令会多出来一个鼠标" ← 指针随滚屏被搬上去
+    //
+    //  修法：搬像素**之前**先把它们擦掉（各自用备份/网格恢复成正常字符），
+    //        搬完之后再按原状态画回来。
+    // ===================================================================
+    bool cursor_was_drawn = g_cursor_drawn;
+    if (cursor_was_drawn && g_cursor_last_col >= 0 && g_cursor_last_row >= 0) {
+        erase_cursor_at(g_cursor_last_col, g_cursor_last_row);
+        g_cursor_drawn = false;
+    }
+
+    bool mouse_was_visible = mouse::visible();
+    if (mouse_was_visible) {
+        mouse::hide();
+    }
+
     if (g_backend == term::Backend::VgaText) {
         volatile u16* buf = vga_buffer();
         for (int y = 1; y < VGA_HEIGHT; ++y) {
@@ -428,6 +456,30 @@ void scroll_one_line()
     //  必须在搬完像素后同步滚动网格，否则光标闪烁会画出幽灵字符。
     // -----------------------------------------------------------------
     scroll_grid_one_line();
+
+    // -----------------------------------------------------------------
+    //  【滚屏后恢复】把光标和鼠标指针画回它们**当前**的位置
+    //  （不是搬上去的旧位置 —— 那正是残影的来源）
+    // -----------------------------------------------------------------
+    if (mouse_was_visible) {
+        mouse::show();
+    }
+    if (cursor_was_drawn) {
+        // 光标行号不随滚屏改变（滚屏时它本来就在最后一行），
+        // 直接按当前 g_col / g_row 重画即可。
+        // 逻辑与 set_cursor_visible() 里画光标的部分保持一致。
+        char c = ' ';
+        if (g_row < MAX_ROWS && g_col < MAX_COLS) {
+            u32 cp = g_screen_code[g_row][g_col];
+            if (cp < 0x80) {
+                c = static_cast<char>(cp ? cp : ' ');
+            }
+        }
+        draw_cell_inverted(g_col, g_row, c);
+        g_cursor_drawn = true;
+        g_cursor_last_col = g_col;
+        g_cursor_last_row = g_row;
+    }
 }
 
 // ---------------------------------------------------------------------------

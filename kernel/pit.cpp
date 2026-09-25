@@ -18,6 +18,7 @@
 #include <kernel/pit.hpp>
 #include <kernel/log.hpp>
 #include <kernel/terminal.hpp>
+#include <kernel/supervisor.hpp>
 #include <kernel/thread.hpp>
 #include <kernel/io.h>
 #include <kernel/isr.hpp>
@@ -52,6 +53,11 @@ void timer_handler(const Registers*)
     // 【阶段 6】推进调度：扣减时间片、唤醒睡眠到期的线程。
     // 真正的切栈不在这里做，而是统一放到中断出口（sched::on_interrupt）。
     sched::tick();
+
+    // 【P2 崩溃自愈】把崩溃的服务重新拉起来。
+    //   放在这里而不是异常上下文里，是因为重启要构造栈、写现场，
+    //   在中断栈上做这些事风险太大。定时器中断是稳定的普通上下文。
+    supervisor::tick();
 }
 
 }  // namespace
